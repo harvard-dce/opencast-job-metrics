@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 
 import re
 import csv
@@ -27,23 +28,12 @@ OC_JOB_STATUS_RUNNING = 2
 
 @click.group()
 @click.option('--profile')
-@click.option('--stack-id')
-@click.pass_context
-def cli(ctx, profile, stack_id):
+@click.pass_obj
+def cli(ctx, profile):
 
     if profile is not None:
         boto3.setup_default_session(profile_name=profile)
         syslog("setting aws profile to {}".format(profile))
-
-    if stack_id is None:
-        raise click.UsageError("--stack-id is required")
-
-    opsworks = boto3.client('opsworks')
-    stacks = opsworks.describe_stacks(StackIds=[stack_id])
-    stack_name = stacks["Stacks"][0]["Name"]
-
-    ctx.obj["stack_id"] = stack_id
-    ctx.obj["stack_name"] = stack_name
 
     cloudwatch = boto3.client('cloudwatch')
     def put_metric_data(namespace, metric_data):
@@ -55,7 +45,7 @@ def cli(ctx, profile, stack_id):
 #            MetricData=metric_data
 #        )
         return
-    ctx.obj["put_metric_data"] = put_metric_data
+    ctx["put_metric_data"] = put_metric_data
 
 
 @cli.group()
@@ -63,26 +53,26 @@ def ops():
     pass
 
 
-@ops.command(name='active')
+@ops.command(name='running')
+@click.option('--stack-name')
 @click.option('--metric-namespace', default='Opencast')
-@click.pass_context
-def active_ops(ctx, metric_namespace):
+@click.pass_obj
+def running_ops(ctx, stack_name, metric_namespace):
 
-    stack_name = ctx.obj["stack_name"]
-    syslog("publishing active operation metrics for '{}'".format(stack_name))
+    syslog("publishing running operation metrics for '{}'".format(stack_name))
 
-    sql = get_active_ops_query()
+    sql = get_running_ops_query()
     op_data = exec_query(sql)
 
     # maps private dns => node name
-    host_map = get_host_map(stack_name)
+    worker_hosts = get_worker_host_map(stack_name)["all"]
 
     metric_data = []
     for op in op_data:
         op_type = op['operation']
         host = urlparse(op['host']).netloc
         count = int(op['cnt'])
-        node_name = host_map.get(host, 'unknown')
+        node_name = worker_hosts.get(host, 'unknown')
 
         dimensions = [
             { "Name": "OperationType", "Value": op_type },
@@ -91,7 +81,7 @@ def active_ops(ctx, metric_namespace):
         ]
 
         dp = {
-            "MetricName": "ActiveJobs",
+            "MetricName": "RunningJobs",
             "Value": count,
             "Unit": "Count",
             "Timestamp": arrow.utcnow().timestamp,
@@ -100,21 +90,21 @@ def active_ops(ctx, metric_namespace):
         metric_data.append(dp)
 
         if len(metric_data) >= 10:
-            ctx.obj["put_metric_data"](metric_namespace, metric_data)
+            ctx["put_metric_data"](metric_namespace, metric_data)
             metric_data = []
 
     if len(metric_data):
-        ctx.obj["put_metric_data"](metric_namespace, metric_data)
+        ctx["put_metric_data"](metric_namespace, metric_data)
 
 
 
 @ops.command(name='runtimes')
+@click.option('--stack-name')
 @click.option('--interval-seconds', default=120)
 @click.option('--metric-namespace', default='Opencast')
-@click.pass_context
-def op_runtimes(ctx, interval_seconds, metric_namespace):
+@click.pass_obj
+def op_runtimes(ctx, stack_name, interval_seconds, metric_namespace):
 
-    stack_name = ctx.obj["stack_name"]
     syslog("publishing operation runtime metrics for past {} seconds for '{}'" \
            .format(interval_seconds, stack_name))
 
@@ -162,16 +152,11 @@ def op_runtimes(ctx, interval_seconds, metric_namespace):
                 metric_data.append(dp)
 
         if len(metric_data) >= 10:
-            ctx.obj["put_metric_data"](metric_namespace, metric_data)
+            ctx["put_metric_data"](metric_namespace, metric_data)
             metric_data = []
 
     if len(metric_data):
-        ctx.obj["put_metric_data"](metric_namespace, metric_data)
-
-
-@cli.group()
-def workflows():
-    pass
+        ctx["put_metric_data"](metric_namespace, metric_data)
 
 
 @cli.group()
@@ -180,41 +165,52 @@ def job_load():
 
 
 @job_load.command(name='used')
+@click.option('--stack-name')
 @click.option('--admin-host')
 @click.option('--api-user')
 @click.option('--api-pass')
-@click.pass_context
-def percent_used(ctx, admin_host, api_user, api_pass):
+@click.pass_obj
+def percent_used(ctx, stack_name, admin_host, api_user, api_pass):
 
-    stack_id = ctx.obj["stack_id"]
-    stack_name = ctx.obj["stack_name"]
+    stack_id = get_stack_id(stack_name)
     syslog("Calculating percent job_load usage for '{}'".format(stack_name))
 
-    workers_host_map = get_host_map(stack_name, state="running", hostname_prefix="workers")
+    worker_hosts = get_worker_host_map(stack_name)
+    running_worker_hosts = worker_hosts["running"]
+    all_worker_hosts = worker_hosts["all"]
     layer_id = get_workers_layer_id(stack_id)
 
-    syslog("{} workers running".format(len(workers_host_map)))
+    syslog("{} workers running".format(len(running_worker_hosts)))
 
-    if not len(workers_host_map):
+    if not len(running_worker_hosts):
         syslog("No workers running!?")
 
-    auth = HTTPDigestAuth(api_user, api_pass)
+    digest_auth = get_digest_auth(api_user, api_pass)
 
-    max_loads = get_load_factors('services/maxload', admin_host, auth)
-    max_loads = {x: y for x, y in max_loads.items() if x in workers_host_map}
+    max_loads = get_load_factors('services/maxload', admin_host, digest_auth)
+    max_loads_running = {x: y for x, y in max_loads.items() if x in running_worker_hosts}
+    max_loads_all = {x: y for x, y in max_loads.items() if x in all_worker_hosts}
 
-    current_loads = get_load_factors('services/currentload', admin_host, auth)
-    current_loads = {x: y for x, y in current_loads.items() if x in workers_host_map}
+    current_loads = get_load_factors('services/currentload', admin_host, digest_auth)
+    current_loads = {x: y for x, y in current_loads.items() if x in running_worker_hosts}
 
-    max_load = sum(max_loads.values())
+    running_max_load = sum(max_loads_running.values())
+    total_max_load = sum(max_loads_all.values())
     current_load = sum(current_loads.values())
 
-    job_load_pct = round( (current_load / max_load) * 100, 2)
-    syslog(
-        "WorkersJobLoadPercentUsed: current: {}, max: {}, pct: {}" \
-            .format(current_load, max_load, job_load_pct))
+    job_load_pct = round( (current_load / running_max_load) * 100, 2)
+    job_load_total_pct = round( (current_load / total_max_load) * 100, 2)
 
-    ctx.obj["put_metric_data"]('AWS/OpsworksCustom', [
+    syslog(
+        "WorkersJobLoadPercentUsed: current: {}, max_running: {}, max_total: "
+        "{}, pct_running: {}, pct_total: {}" \
+            .format(current_load,
+                    running_max_load,
+                    total_max_load,
+                    job_load_pct,
+                    job_load_total_pct))
+
+    ctx["put_metric_data"]('AWS/OpsworksCustom', [
         {
             "MetricName": "WorkersJobLoadPercentUsed",
             "Value": job_load_pct,
@@ -226,18 +222,31 @@ def percent_used(ctx, admin_host, api_user, api_pass):
                 }
             ]
 
+        },
+        {
+            "MetricName": "WorkersJobLoadPercentTotalUsed",
+            "Value": job_load_total_pct,
+            "Unit": 'Percent',
+            "Dimensions": [
+                {
+                    "Name": "LayerId",
+                    "Value": layer_id
+                }
+            ]
+
         }
     ])
 
+
 @job_load.command()
+@click.option('--stack-name')
 @click.option('--admin-host')
 @click.option('--api-user')
 @click.option('--api-pass')
-@click.pass_context
-def max_available(ctx, admin_host, api_user, api_pass):
+@click.pass_obj
+def max_available(ctx, stack_name, admin_host, api_user, api_pass):
 
-    stack_id = ctx.obj["stack_id"]
-    stack_name = ctx.obj["stack_name"]
+    stack_id = get_stack_id(stack_name)
     syslog("Calculating max available load for '{}'".format(stack_name))
 
     workers_host_map = get_host_map(stack_name, state="running", hostname_prefix="workers")
@@ -248,14 +257,13 @@ def max_available(ctx, admin_host, api_user, api_pass):
     if not len(workers_host_map):
         syslog("No workers running!?")
 
-    auth = HTTPDigestAuth(api_user, api_pass)
+    digest_auth = get_digest_auth(api_user, api_pass)
 
-    max_loads = get_load_factors('services/maxload', admin_host, auth)
+    max_loads = get_load_factors('services/maxload', admin_host, digest_auth)
     max_loads = {x: y for x, y in max_loads.items() if x in workers_host_map}
 
-    current_loads = get_load_factors('services/currentload', admin_host, auth)
+    current_loads = get_load_factors('services/currentload', admin_host, digest_auth)
     current_loads = {x: y for x, y in current_loads.items() if x in workers_host_map}
-
 
     # get a tuple of each host's max/current load
     available_loads = {
@@ -267,7 +275,7 @@ def max_available(ctx, admin_host, api_user, api_pass):
     current_max = sorted(available_loads.values(), reverse=True)[0]
     syslog("Max available job_load: {}".format(current_max))
 
-    ctx.obj["put_metric_data"]('AWS/OpsworksCustom', [
+    ctx["put_metric_data"]('AWS/OpsworksCustom', [
         {
             "MetricName": "WorkersJobLoadMaxAavailable",
             "Value": current_max,
@@ -281,6 +289,186 @@ def max_available(ctx, admin_host, api_user, api_pass):
 
         }
     ])
+
+
+@cli.group()
+def workflows():
+    pass
+
+
+@workflows.command(name='running')
+@click.option('--stack-name')
+@click.option('--admin-host')
+@click.option('--api-user')
+@click.option('--api-pass')
+@click.pass_obj
+def running_workflows(ctx, stack_name, admin_host, api_user, api_pass):
+
+    stack_id = get_stack_id(stack_name)
+    digest_auth = get_digest_auth(api_user, api_pass)
+    syslog("Fetching count of running workflows")
+
+    endpoint_url = urljoin("http://" + admin_host, 'admin-ng/job/tasks.json')
+    params = {'limit': 999, 'status': 'RUNNING'}
+    headers = {'X-REQUESTED-AUTH': 'Digest'}
+    resp = requests.get(endpoint_url, params=params, auth=digest_auth,
+                        headers=headers)
+    tasks = resp.json()
+    workflow_count = tasks["count"]
+
+    syslog("Running workflows: {}".format(workflow_count))
+    ctx["put_metric_data"]('AWS/OpsworksCustom', [
+        {
+            "MetricName": "RunningWorkflows",
+            "Value": workflow_count,
+            "Unit": 'Count',
+            "Dimensions": [
+                {
+                    "Name": "StackId",
+                    "Value": stack_id
+                }
+            ]
+
+        }
+    ])
+
+
+@workflows.command(name='runtimes')
+@click.option('--stack-name')
+@click.option('--admin-host')
+@click.option('--api-user')
+@click.option('--api-pass')
+@click.option('--end-date')
+@click.option('--days-interval', default=1)
+@click.option('--metric-namespace', default='Opencast')
+@click.option('--mp')
+@click.pass_obj
+def workflow_runtimes(ctx, stack_name, admin_host, api_user, api_pass,
+                      end_date, days_interval, metric_namespace, mp):
+
+    stack_id = get_stack_id(stack_name)
+    digest_auth = get_digest_auth(api_user, api_pass)
+
+    if end_date is None:
+        end_date = arrow.now()
+    else:
+        end_date = arrow.get(end_date)
+
+    start_date = end_date.replace(days=-days_interval)
+
+    syslog("publishing workflow runtime metrics")
+
+    endpoint_url = urljoin("http://" + admin_host, 'workflow/instances.json')
+    headers = {'X-REQUESTED-AUTH': 'Digest'}
+
+    params = {
+        'count': 20,
+        'startPage': 0,
+        # opencast is picky af about these date strings smh
+        'fromdate': start_date.format('YYYY-MM-DDTHH:mm:ss') + "Z",
+        'todate': end_date.format('YYYY-MM-DDTHH:mm:ss') + "Z",
+        'state': 'SUCCEEDED'
+    }
+
+    if mp is not None:
+        params["mp"] = mp
+
+    workflows = []
+    while True:
+        resp = requests.get(endpoint_url, params=params, auth=digest_auth,
+                            headers=headers)
+        wf_data = resp.json()["workflows"]
+        if "workflow" not in wf_data:
+            break
+        try:
+            # "workflow" will be an array if > 1
+            workflows.extend(wf_data["workflow"])
+        except TypeError:
+            # or a single object if there's only 1
+            workflows.append(wf_data["workflow"])
+        syslog("Collected {} workflows".format(len(workflows)))
+        params["startPage"] += 1
+        break
+
+    metric_data = []
+    for wf in workflows:
+        ops = wf["operations"]["operation"]
+        wf_type = wf["template"]
+        track_duration = get_track_duration_from_wf(wf)
+        wf_duration, wf_completed_ts = get_wf_duration_completed(ops)
+        wf_completed = arrow.get(wf_completed_ts).replace(tzinfo='US/Eastern')
+
+        dimensions = [
+            { "Name": "WorkflowType", "Value": wf_type },
+            { "Name": "OpsworksStack", "Value": stack_name }
+        ]
+
+        dp = {
+            "MetricName": "WorkflowDuration",
+            "Value": wf_duration,
+            "Unit": "Count",
+            "Timestamp": wf_completed.to('UTC').timestamp,
+            "Dimensions": dimensions
+        }
+        metric_data.append(dp)
+
+        if track_duration is not None:
+            perf_ratio = round(wf_duration / track_duration, 2)
+
+            dp = {
+                "MetricName": "WorkflowPerfRatio",
+                "Value": perf_ratio,
+                "Unit": "None",
+                "Timestamp": wf_completed,
+                "Dimensions": dimensions
+            }
+            metric_data.append(dp)
+
+        if len(metric_data) >= 10:
+            ctx["put_metric_data"](metric_namespace, metric_data)
+            metric_data = []
+
+    if len(metric_data):
+        ctx["put_metric_data"](metric_namespace, metric_data)
+
+
+def get_track_duration_from_wf(wf):
+    try:
+        pubs = wf["mediapackage"]["publications"]["publication"]
+    except KeyError:
+        return None
+    if isinstance(pubs, dict):
+        pubs = [pubs]
+    for pub in pubs:
+        media = pub["media"]
+        if not media:
+            continue
+        tracks = media["track"]
+        if isinstance(tracks, dict):
+            tracks = [tracks]
+        for track in tracks:
+            if "duration" in track:
+                return track["duration"] / 1000
+    return None
+
+
+def get_wf_duration_completed(ops):
+    wf_start = ops[0]["started"] / 1000
+    wf_end = ops[-1]["completed"] / 1000
+    wf_duration = (wf_end - wf_start)
+    return wf_duration, wf_end
+
+
+def get_stack_id(stack_name):
+    opsworks = boto3.client('opsworks')
+    stacks = opsworks.describe_stacks()
+    jp_query = "Stacks[?Name=='{}'] | [0].StackId".format(stack_name)
+    stack_id = jmespath.search(jp_query, stacks)
+    return stack_id
+
+
+def get_digest_auth(api_user, api_pass):
+    return HTTPDigestAuth(api_user, api_pass)
 
 
 def get_workers_layer_id(stack_id):
@@ -304,7 +492,7 @@ def get_load_factors(endpoint, admin_host, auth):
     return load_factors
 
 
-def get_host_map(stack_name, state=None, hostname_prefix=None):
+def get_worker_host_map(stack_name):
 
     ec2 = boto3.client('ec2')
     instances = ec2.describe_instances(
@@ -314,19 +502,20 @@ def get_host_map(stack_name, state=None, hostname_prefix=None):
                 "Tags[?Key=='opsworks:instance'] | [0].Value]")
     private_dns_to_hostname = jmespath.search(jp_query, instances)
 
-    if state is not None:
-        private_dns_to_hostname = [
-            x for x in private_dns_to_hostname
-            if x[1] == state
-        ]
+    worker_hosts = [
+        x for x in private_dns_to_hostname
+        if x[2].startswith("workers")
+    ]
 
-    if hostname_prefix is not None:
-        private_dns_to_hostname = [
-            x for x in private_dns_to_hostname
-            if x[2].startswith(hostname_prefix)
-        ]
+    running_hosts = [
+        x for x in worker_hosts
+        if x[1] == "running"
+    ]
 
-    return dict([(x[0], x[2]) for x in private_dns_to_hostname])
+    return {
+        "running": dict([(x[0], x[2]) for x in running_hosts]),
+        "all": dict([(x[0], x[2]) for x in worker_hosts]),
+    }
 
 
 def get_runtimes_query(interval_seconds):
@@ -345,7 +534,7 @@ def get_runtimes_query(interval_seconds):
     return re.compile(r'\s+').sub(' ', query.strip())
 
 
-def get_active_ops_query():
+def get_running_ops_query():
     query = """
         SELECT
             ocj.operation, ochr.host, count(*) as cnt
