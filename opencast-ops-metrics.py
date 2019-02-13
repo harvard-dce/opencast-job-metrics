@@ -422,7 +422,7 @@ def workflow_runtimes(ctx, stack_name, admin_host, api_user, api_pass,
 def get_track_duration_from_wf(wf):
     try:
         pubs = wf["mediapackage"]["publications"]["publication"]
-    except KeyError:
+    except (KeyError, TypeError):
         return None
     if isinstance(pubs, dict):
         pubs = [pubs]
