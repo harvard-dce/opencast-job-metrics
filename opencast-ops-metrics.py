@@ -6,14 +6,14 @@ import boto3
 import shlex
 import click
 import arrow
-from syslog import syslog, openlog
+from syslog import syslog, openlog, LOG_ERR
 import jmespath
 from urllib.parse import urlparse, urljoin
 from io import StringIO
 import requests
 from requests.auth import HTTPDigestAuth
 from datetime import datetime
-from subprocess import Popen, PIPE
+from subprocess import Popen, PIPE, TimeoutExpired
 import xml.etree.ElementTree as ET
 
 # prefix syslog messages
@@ -545,8 +545,15 @@ def exec_query(sql):
     cmd = "/usr/bin/mysql -B -e '{}' {}".format(sql, "opencast")
     split_cmd = shlex.split(cmd)
     subproc = Popen(split_cmd, stdout=PIPE, stderr=PIPE)
-    (stdout, stderr) = subproc.communicate()
+    try:
+        (stdout, stderr) = subproc.communicate(timeout=5)
+    except TimeoutExpired as e:
+        syslog(LOG_ERR, str(e))
+        raise
     err = stderr.decode("utf-8")
+    if err:
+        syslog(LOG_ERR, err)
+        raise RuntimeError(err)
     tsv_data = StringIO(stdout.decode("utf-8"))
     return csv.DictReader(tsv_data, delimiter="\t")
 
