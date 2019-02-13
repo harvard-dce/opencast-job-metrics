@@ -6,7 +6,7 @@ import boto3
 import shlex
 import click
 import arrow
-from syslog import syslog, openlog, LOG_ERR
+from syslog import syslog, openlog, LOG_ERR, LOG_WARNING
 import jmespath
 from urllib.parse import urlparse, urljoin
 from io import StringIO
@@ -275,7 +275,7 @@ def max_available(ctx, stack_name, admin_host, api_user, api_pass,
         {
             "MetricName": "WorkersJobLoadMaxAavailable",
             "Value": current_max,
-            "Unit": 'Percent',
+            "Unit": 'None',
             "Dimensions": dimensions
         }
     ])
@@ -378,12 +378,27 @@ def workflow_runtimes(ctx, stack_name, admin_host, api_user, api_pass,
         params["startPage"] += 1
 
     metric_data = []
+
+    two_weeks_ago = arrow.utcnow().replace(days=-14).timestamp
+
     for wf in workflows:
         ops = wf["operations"]["operation"]
         wf_type = wf["template"]
+
+        # skip these; their operations all happened in the past
+        if "repub" in wf_type:
+            continue
+
         track_duration = get_track_duration_from_wf(wf)
         wf_duration, wf_completed_ts = get_wf_duration_completed(ops)
         wf_completed = arrow.get(wf_completed_ts).replace(tzinfo='US/Eastern')
+
+        # skip and warn about any workflows who's operations
+        # completed > 2 weeks ago
+        if wf_completed_ts < two_weeks_ago:
+            syslog(LOG_WARNING, "Workflow {} last operation completed more "
+                                "than two weeks ago!".format(wf["id"]))
+            continue
 
         dimensions = [
             { "Name": "WorkflowType", "Value": wf_type },
@@ -393,7 +408,7 @@ def workflow_runtimes(ctx, stack_name, admin_host, api_user, api_pass,
         dp = {
             "MetricName": "WorkflowDuration",
             "Value": wf_duration,
-            "Unit": "Count",
+            "Unit": "Seconds",
             "Timestamp": wf_completed.to('UTC').timestamp,
             "Dimensions": dimensions
         }
