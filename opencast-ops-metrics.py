@@ -376,7 +376,6 @@ def workflow_runtimes(ctx, stack_name, admin_host, api_user, api_pass,
             workflows.append(wf_data["workflow"])
         syslog("Collected {} workflows".format(len(workflows)))
         params["startPage"] += 1
-        break
 
     metric_data = []
     for wf in workflows:
@@ -407,7 +406,7 @@ def workflow_runtimes(ctx, stack_name, admin_host, api_user, api_pass,
                 "MetricName": "WorkflowPerfRatio",
                 "Value": perf_ratio,
                 "Unit": "None",
-                "Timestamp": wf_completed,
+                "Timestamp": wf_completed.to('UTC').timestamp,
                 "Dimensions": dimensions
             }
             metric_data.append(dp)
