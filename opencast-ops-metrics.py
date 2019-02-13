@@ -76,12 +76,12 @@ def running_ops(ctx, stack_name, metric_namespace):
 
         dimensions = [
             { "Name": "OperationType", "Value": op_type },
-            { "Name": "ProcessingHost", "Value": node_name },
+            #{ "Name": "ProcessingHost", "Value": node_name },
             { "Name": "OpsworksStack", "Value": stack_name }
         ]
 
         dp = {
-            "MetricName": "RunningJobs",
+            "MetricName": "RunningOperations",
             "Value": count,
             "Unit": "Count",
             "Timestamp": arrow.utcnow().timestamp,
@@ -169,8 +169,10 @@ def job_load():
 @click.option('--admin-host')
 @click.option('--api-user')
 @click.option('--api-pass')
+@click.option('--metric-namespace', default='Opencast')
 @click.pass_obj
-def percent_used(ctx, stack_name, admin_host, api_user, api_pass):
+def percent_used(ctx, stack_name, admin_host, api_user, api_pass,
+                 metric_namespace):
 
     stack_id = get_stack_id(stack_name)
     syslog("Calculating percent job_load usage for '{}'".format(stack_name))
@@ -210,32 +212,22 @@ def percent_used(ctx, stack_name, admin_host, api_user, api_pass):
                     job_load_pct,
                     job_load_total_pct))
 
-    ctx["put_metric_data"]('AWS/OpsworksCustom', [
+    dimensions = [{ "Name": "OpsworksStack", "Value": stack_name }]
+    metric_data = [
         {
             "MetricName": "WorkersJobLoadPercentUsed",
             "Value": job_load_pct,
             "Unit": 'Percent',
-            "Dimensions": [
-                {
-                    "Name": "LayerId",
-                    "Value": layer_id
-                }
-            ]
-
+            "Dimensions": dimensions
         },
         {
             "MetricName": "WorkersJobLoadPercentTotalUsed",
             "Value": job_load_total_pct,
             "Unit": 'Percent',
-            "Dimensions": [
-                {
-                    "Name": "LayerId",
-                    "Value": layer_id
-                }
-            ]
-
+            "Dimensions": dimensions
         }
-    ])
+    ]
+    ctx["put_metric_data"](metric_namespace, metric_data)
 
 
 @job_load.command()
@@ -243,27 +235,30 @@ def percent_used(ctx, stack_name, admin_host, api_user, api_pass):
 @click.option('--admin-host')
 @click.option('--api-user')
 @click.option('--api-pass')
+@click.option('--metric-namespace', default='Opencast')
 @click.pass_obj
-def max_available(ctx, stack_name, admin_host, api_user, api_pass):
+def max_available(ctx, stack_name, admin_host, api_user, api_pass,
+                  metric_namespace):
 
     stack_id = get_stack_id(stack_name)
     syslog("Calculating max available load for '{}'".format(stack_name))
 
-    workers_host_map = get_host_map(stack_name, state="running", hostname_prefix="workers")
+    worker_hosts = get_worker_host_map(stack_name)
+    running_worker_hosts = worker_hosts["running"]
     layer_id = get_workers_layer_id(stack_id)
 
-    syslog("{} workers running".format(len(workers_host_map)))
+    syslog("{} workers running".format(len(running_worker_hosts)))
 
-    if not len(workers_host_map):
+    if not len(running_worker_hosts):
         syslog("No workers running!?")
 
     digest_auth = get_digest_auth(api_user, api_pass)
 
     max_loads = get_load_factors('services/maxload', admin_host, digest_auth)
-    max_loads = {x: y for x, y in max_loads.items() if x in workers_host_map}
+    max_loads = {x: y for x, y in max_loads.items() if x in running_worker_hosts}
 
     current_loads = get_load_factors('services/currentload', admin_host, digest_auth)
-    current_loads = {x: y for x, y in current_loads.items() if x in workers_host_map}
+    current_loads = {x: y for x, y in current_loads.items() if x in running_worker_hosts}
 
     # get a tuple of each host's max/current load
     available_loads = {
@@ -275,18 +270,13 @@ def max_available(ctx, stack_name, admin_host, api_user, api_pass):
     current_max = sorted(available_loads.values(), reverse=True)[0]
     syslog("Max available job_load: {}".format(current_max))
 
-    ctx["put_metric_data"]('AWS/OpsworksCustom', [
+    dimensions = [{ "Name": "OpsworksStack", "Value": stack_name }]
+    ctx["put_metric_data"](metric_namespace, [
         {
             "MetricName": "WorkersJobLoadMaxAavailable",
             "Value": current_max,
             "Unit": 'Percent',
-            "Dimensions": [
-                {
-                    "Name": "LayerId",
-                    "Value": layer_id
-                }
-            ]
-
+            "Dimensions": dimensions
         }
     ])
 
@@ -301,8 +291,10 @@ def workflows():
 @click.option('--admin-host')
 @click.option('--api-user')
 @click.option('--api-pass')
+@click.option('--metric-namespace', default='Opencast')
 @click.pass_obj
-def running_workflows(ctx, stack_name, admin_host, api_user, api_pass):
+def running_workflows(ctx, stack_name, admin_host, api_user, api_pass,
+                      metric_namespace):
 
     stack_id = get_stack_id(stack_name)
     digest_auth = get_digest_auth(api_user, api_pass)
@@ -317,18 +309,14 @@ def running_workflows(ctx, stack_name, admin_host, api_user, api_pass):
     workflow_count = tasks["count"]
 
     syslog("Running workflows: {}".format(workflow_count))
-    ctx["put_metric_data"]('AWS/OpsworksCustom', [
+
+    dimensions = [{ "Name": "OpsworksStack", "Value": stack_name }]
+    ctx["put_metric_data"](metric_namespace, [
         {
             "MetricName": "RunningWorkflows",
             "Value": workflow_count,
             "Unit": 'Count',
-            "Dimensions": [
-                {
-                    "Name": "StackId",
-                    "Value": stack_id
-                }
-            ]
-
+            "Dimensions": dimensions
         }
     ])
 
