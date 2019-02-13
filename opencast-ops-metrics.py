@@ -28,8 +28,9 @@ OC_JOB_STATUS_RUNNING = 2
 
 @click.group()
 @click.option('--profile')
+@click.option('--dry-run', is_flag=True)
 @click.pass_obj
-def cli(ctx, profile):
+def cli(ctx, profile, dry_run):
 
     if profile is not None:
         boto3.setup_default_session(profile_name=profile)
@@ -40,11 +41,15 @@ def cli(ctx, profile):
         syslog("Sending {} metric data points to {}".format(
             len(metric_data), namespace
         ))
-#        resp = cloudwatch.put_metric_data(
-#            Namespace=namespace,
-#            MetricData=metric_data
-#        )
-        return
+        if not dry_run:
+            try:
+                resp = cloudwatch.put_metric_data(
+                    Namespace=namespace,
+                    MetricData=metric_data
+                )
+            except Exception as e:
+                syslog(LOG_ERR, "{}, {}".format(e, metric_data))
+
     ctx["put_metric_data"] = put_metric_data
 
 
@@ -385,20 +390,8 @@ def workflow_runtimes(ctx, stack_name, admin_host, api_user, api_pass,
         ops = wf["operations"]["operation"]
         wf_type = wf["template"]
 
-        # skip these; their operations all happened in the past
-        if "repub" in wf_type:
-            continue
-
         track_duration = get_track_duration_from_wf(wf)
-        wf_duration, wf_completed_ts = get_wf_duration_completed(ops)
-        wf_completed = arrow.get(wf_completed_ts).replace(tzinfo='US/Eastern')
-
-        # skip and warn about any workflows who's operations
-        # completed > 2 weeks ago
-        if wf_completed_ts < two_weeks_ago:
-            syslog(LOG_WARNING, "Workflow {} last operation completed more "
-                                "than two weeks ago!".format(wf["id"]))
-            continue
+        wf_duration = get_wf_duration(ops)
 
         dimensions = [
             { "Name": "WorkflowType", "Value": wf_type },
@@ -409,7 +402,6 @@ def workflow_runtimes(ctx, stack_name, admin_host, api_user, api_pass,
             "MetricName": "WorkflowDuration",
             "Value": wf_duration,
             "Unit": "Seconds",
-            "Timestamp": wf_completed.to('UTC').timestamp,
             "Dimensions": dimensions
         }
         metric_data.append(dp)
@@ -421,7 +413,6 @@ def workflow_runtimes(ctx, stack_name, admin_host, api_user, api_pass,
                 "MetricName": "WorkflowPerfRatio",
                 "Value": perf_ratio,
                 "Unit": "None",
-                "Timestamp": wf_completed.to('UTC').timestamp,
                 "Dimensions": dimensions
             }
             metric_data.append(dp)
@@ -454,11 +445,11 @@ def get_track_duration_from_wf(wf):
     return None
 
 
-def get_wf_duration_completed(ops):
+def get_wf_duration(ops):
     wf_start = ops[0]["started"] / 1000
     wf_end = ops[-1]["completed"] / 1000
     wf_duration = (wf_end - wf_start)
-    return wf_duration, wf_end
+    return wf_duration
 
 
 def get_stack_id(stack_name):
