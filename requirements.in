@@ -3,3 +3,6 @@ boto3
 jmespath
 arrow
 requests
+black
+flake8
+pre-commit
