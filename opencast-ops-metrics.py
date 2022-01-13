@@ -6,7 +6,7 @@ import boto3
 import shlex
 import click
 import arrow
-from syslog import syslog, openlog, LOG_ERR, LOG_WARNING
+from syslog import syslog, openlog, LOG_ERR
 import jmespath
 from urllib.parse import urlparse, urljoin
 from io import StringIO
@@ -20,15 +20,15 @@ import xml.etree.ElementTree as ET
 openlog("opencast-ops-metrics")
 
 XML_NAMESPACES = {
-    'track': 'http://mediapackage.opencastproject.org',
-    'oc': 'http://serviceregistry.opencastproject.org'
+    "track": "http://mediapackage.opencastproject.org",
+    "oc": "http://serviceregistry.opencastproject.org",
 }
 OC_JOB_STATUS_RUNNING = 2
 
 
 @click.group()
-@click.option('--profile')
-@click.option('--dry-run', is_flag=True)
+@click.option("--profile")
+@click.option("--dry-run", is_flag=True)
 @click.pass_obj
 def cli(ctx, profile, dry_run):
 
@@ -36,16 +36,18 @@ def cli(ctx, profile, dry_run):
         boto3.setup_default_session(profile_name=profile)
         syslog("setting aws profile to {}".format(profile))
 
-    cloudwatch = boto3.client('cloudwatch')
+    cloudwatch = boto3.client("cloudwatch")
+
     def put_metric_data(namespace, metric_data):
-        syslog("Sending {} metric data points to {}".format(
-            len(metric_data), namespace
-        ))
+        syslog(
+            "Sending {} metric data points to {}".format(
+                len(metric_data), namespace
+            )
+        )
         if not dry_run:
             try:
-                resp = cloudwatch.put_metric_data(
-                    Namespace=namespace,
-                    MetricData=metric_data
+                cloudwatch.put_metric_data(
+                    Namespace=namespace, MetricData=metric_data
                 )
             except Exception as e:
                 syslog(LOG_ERR, "{}, {}".format(e, metric_data))
@@ -58,9 +60,9 @@ def ops():
     pass
 
 
-@ops.command(name='running')
-@click.option('--stack-name')
-@click.option('--metric-namespace', default='Opencast')
+@ops.command(name="running")
+@click.option("--stack-name")
+@click.option("--metric-namespace", default="Opencast")
 @click.pass_obj
 def running_ops(ctx, stack_name, metric_namespace):
 
@@ -69,20 +71,14 @@ def running_ops(ctx, stack_name, metric_namespace):
     sql = get_running_ops_query()
     op_data = exec_query(sql)
 
-    # maps private dns => node name
-    worker_hosts = get_worker_host_map(stack_name)["all"]
-
     metric_data = []
     for op in op_data:
-        op_type = op['operation']
-        host = urlparse(op['host']).netloc
-        count = int(op['cnt'])
-        node_name = worker_hosts.get(host, 'unknown')
+        op_type = op["operation"]
+        count = int(op["cnt"])
 
         dimensions = [
-            { "Name": "OperationType", "Value": op_type },
-            #{ "Name": "ProcessingHost", "Value": node_name },
-            { "Name": "OpsworksStack", "Value": stack_name }
+            {"Name": "OperationType", "Value": op_type},
+            {"Name": "OpsworksStack", "Value": stack_name},
         ]
 
         dp = {
@@ -90,7 +86,7 @@ def running_ops(ctx, stack_name, metric_namespace):
             "Value": count,
             "Unit": "Count",
             "Timestamp": arrow.utcnow().timestamp,
-            "Dimensions": dimensions
+            "Dimensions": dimensions,
         }
         metric_data.append(dp)
 
@@ -102,16 +98,18 @@ def running_ops(ctx, stack_name, metric_namespace):
         ctx["put_metric_data"](metric_namespace, metric_data)
 
 
-
-@ops.command(name='runtimes')
-@click.option('--stack-name')
-@click.option('--interval-seconds', default=120)
-@click.option('--metric-namespace', default='Opencast')
+@ops.command(name="runtimes")
+@click.option("--stack-name")
+@click.option("--interval-seconds", default=120)
+@click.option("--metric-namespace", default="Opencast")
 @click.pass_obj
 def op_runtimes(ctx, stack_name, interval_seconds, metric_namespace):
 
-    syslog("publishing operation runtime metrics for past {} seconds for '{}'" \
-           .format(interval_seconds, stack_name))
+    syslog(
+        "publishing operation runtime metrics for past {} seconds for '{}'".format(
+            interval_seconds, stack_name
+        )
+    )
 
     sql = get_runtimes_query(interval_seconds)
     op_data = exec_query(sql)
@@ -119,30 +117,32 @@ def op_runtimes(ctx, stack_name, interval_seconds, metric_namespace):
     metric_data = []
     for op in op_data:
 
-        created = arrow.get(op['date_created']).replace(tzinfo='US/Eastern')
-        started = arrow.get(op['date_started']).replace(tzinfo='US/Eastern')
-        completed = arrow.get(op['date_completed']).replace(tzinfo='US/Eastern')
+        started = arrow.get(op["date_started"]).replace(tzinfo="US/Eastern")
+        completed = arrow.get(op["date_completed"]).replace(
+            tzinfo="US/Eastern"
+        )
 
         runtime = (completed - started).seconds
-        queuetime = (started - created).seconds
 
-        op_type = op['operation']
-        payload = op['payload']
+        op_type = op["operation"]
+        payload = op["payload"]
 
         dimensions = [
-            { "Name": "OperationType", "Value": op_type },
-            { "Name": "OpsworksStack", "Value": stack_name }
+            {"Name": "OperationType", "Value": op_type},
+            {"Name": "OpsworksStack", "Value": stack_name},
         ]
 
-        metric_data.append({
-            "MetricName": "OperationRuntime",
-            "Value": runtime,
-            "Unit": "Seconds",
-            "Timestamp": completed.to('UTC').timestamp,
-            "Dimensions": dimensions
-        })
+        metric_data.append(
+            {
+                "MetricName": "OperationRuntime",
+                "Value": runtime,
+                "Unit": "Seconds",
+                "Timestamp": completed.to("UTC").timestamp,
+                "Dimensions": dimensions,
+            }
+        )
 
-        if payload.startswith('<?xml'):
+        if payload.startswith("<?xml"):
             duration = extract_duration_from_payload(payload)
             if duration:
                 perf_ratio = round(runtime / duration, 2)
@@ -150,9 +150,9 @@ def op_runtimes(ctx, stack_name, interval_seconds, metric_namespace):
                 dp = {
                     "MetricName": "OperationPerfRatio",
                     "Value": perf_ratio,
-                    "Unit": 'None',
-                    "Timestamp": completed.to('UTC').timestamp,
-                    "Dimensions": dimensions
+                    "Unit": "None",
+                    "Timestamp": completed.to("UTC").timestamp,
+                    "Dimensions": dimensions,
                 }
                 metric_data.append(dp)
 
@@ -169,23 +169,22 @@ def job_load():
     pass
 
 
-@job_load.command(name='used')
-@click.option('--stack-name')
-@click.option('--admin-host')
-@click.option('--api-user')
-@click.option('--api-pass')
-@click.option('--metric-namespace', default='Opencast')
+@job_load.command(name="used")
+@click.option("--stack-name")
+@click.option("--admin-host")
+@click.option("--api-user")
+@click.option("--api-pass")
+@click.option("--metric-namespace", default="Opencast")
 @click.pass_obj
-def percent_used(ctx, stack_name, admin_host, api_user, api_pass,
-                 metric_namespace):
+def percent_used(
+    ctx, stack_name, admin_host, api_user, api_pass, metric_namespace
+):
 
-    stack_id = get_stack_id(stack_name)
     syslog("Calculating percent job_load usage for '{}'".format(stack_name))
 
     worker_hosts = get_worker_host_map(stack_name)
     running_worker_hosts = worker_hosts["running"]
     all_worker_hosts = worker_hosts["all"]
-    layer_id = get_workers_layer_id(stack_id)
 
     syslog("{} workers running".format(len(running_worker_hosts)))
 
@@ -194,63 +193,72 @@ def percent_used(ctx, stack_name, admin_host, api_user, api_pass,
 
     digest_auth = get_digest_auth(api_user, api_pass)
 
-    max_loads = get_load_factors('services/maxload', admin_host, digest_auth)
-    max_loads_running = {x: y for x, y in max_loads.items() if x in running_worker_hosts}
-    max_loads_all = {x: y for x, y in max_loads.items() if x in all_worker_hosts}
+    max_loads = get_load_factors("services/maxload", admin_host, digest_auth)
+    max_loads_running = {
+        x: y for x, y in max_loads.items() if x in running_worker_hosts
+    }
+    max_loads_all = {
+        x: y for x, y in max_loads.items() if x in all_worker_hosts
+    }
 
-    current_loads = get_load_factors('services/currentload', admin_host, digest_auth)
-    current_loads = {x: y for x, y in current_loads.items() if x in running_worker_hosts}
+    current_loads = get_load_factors(
+        "services/currentload", admin_host, digest_auth
+    )
+    current_loads = {
+        x: y for x, y in current_loads.items() if x in running_worker_hosts
+    }
 
     running_max_load = sum(max_loads_running.values())
     total_max_load = sum(max_loads_all.values())
     current_load = sum(current_loads.values())
 
-    job_load_pct = round( (current_load / running_max_load) * 100, 2)
-    job_load_total_pct = round( (current_load / total_max_load) * 100, 2)
+    job_load_pct = round((current_load / running_max_load) * 100, 2)
+    job_load_total_pct = round((current_load / total_max_load) * 100, 2)
 
     syslog(
         "WorkersJobLoadPercentUsed: current: {}, max_running: {}, max_total: "
-        "{}, pct_running: {}, pct_total: {}" \
-            .format(current_load,
-                    running_max_load,
-                    total_max_load,
-                    job_load_pct,
-                    job_load_total_pct))
+        "{}, pct_running: {}, pct_total: {}".format(
+            current_load,
+            running_max_load,
+            total_max_load,
+            job_load_pct,
+            job_load_total_pct,
+        )
+    )
 
-    dimensions = [{ "Name": "OpsworksStack", "Value": stack_name }]
+    dimensions = [{"Name": "OpsworksStack", "Value": stack_name}]
     metric_data = [
         {
             "MetricName": "WorkersJobLoadPercentUsed",
             "Value": job_load_pct,
-            "Unit": 'Percent',
-            "Dimensions": dimensions
+            "Unit": "Percent",
+            "Dimensions": dimensions,
         },
         {
             "MetricName": "WorkersJobLoadPercentTotalUsed",
             "Value": job_load_total_pct,
-            "Unit": 'Percent',
-            "Dimensions": dimensions
-        }
+            "Unit": "Percent",
+            "Dimensions": dimensions,
+        },
     ]
     ctx["put_metric_data"](metric_namespace, metric_data)
 
 
 @job_load.command()
-@click.option('--stack-name')
-@click.option('--admin-host')
-@click.option('--api-user')
-@click.option('--api-pass')
-@click.option('--metric-namespace', default='Opencast')
+@click.option("--stack-name")
+@click.option("--admin-host")
+@click.option("--api-user")
+@click.option("--api-pass")
+@click.option("--metric-namespace", default="Opencast")
 @click.pass_obj
-def max_available(ctx, stack_name, admin_host, api_user, api_pass,
-                  metric_namespace):
+def max_available(
+    ctx, stack_name, admin_host, api_user, api_pass, metric_namespace
+):
 
-    stack_id = get_stack_id(stack_name)
     syslog("Calculating max available load for '{}'".format(stack_name))
 
     worker_hosts = get_worker_host_map(stack_name)
     running_worker_hosts = worker_hosts["running"]
-    layer_id = get_workers_layer_id(stack_id)
 
     syslog("{} workers running".format(len(running_worker_hosts)))
 
@@ -259,11 +267,17 @@ def max_available(ctx, stack_name, admin_host, api_user, api_pass,
 
     digest_auth = get_digest_auth(api_user, api_pass)
 
-    max_loads = get_load_factors('services/maxload', admin_host, digest_auth)
-    max_loads = {x: y for x, y in max_loads.items() if x in running_worker_hosts}
+    max_loads = get_load_factors("services/maxload", admin_host, digest_auth)
+    max_loads = {
+        x: y for x, y in max_loads.items() if x in running_worker_hosts
+    }
 
-    current_loads = get_load_factors('services/currentload', admin_host, digest_auth)
-    current_loads = {x: y for x, y in current_loads.items() if x in running_worker_hosts}
+    current_loads = get_load_factors(
+        "services/currentload", admin_host, digest_auth
+    )
+    current_loads = {
+        x: y for x, y in current_loads.items() if x in running_worker_hosts
+    }
 
     # get a tuple of each host's max/current load
     available_loads = {
@@ -275,15 +289,18 @@ def max_available(ctx, stack_name, admin_host, api_user, api_pass,
     current_max = sorted(available_loads.values(), reverse=True)[0]
     syslog("Max available job_load: {}".format(current_max))
 
-    dimensions = [{ "Name": "OpsworksStack", "Value": stack_name }]
-    ctx["put_metric_data"](metric_namespace, [
-        {
-            "MetricName": "WorkersJobLoadMaxAavailable",
-            "Value": current_max,
-            "Unit": 'None',
-            "Dimensions": dimensions
-        }
-    ])
+    dimensions = [{"Name": "OpsworksStack", "Value": stack_name}]
+    ctx["put_metric_data"](
+        metric_namespace,
+        [
+            {
+                "MetricName": "WorkersJobLoadMaxAavailable",
+                "Value": current_max,
+                "Unit": "None",
+                "Dimensions": dimensions,
+            }
+        ],
+    )
 
 
 @cli.group()
@@ -291,55 +308,67 @@ def workflows():
     pass
 
 
-@workflows.command(name='running')
-@click.option('--stack-name')
-@click.option('--admin-host')
-@click.option('--api-user')
-@click.option('--api-pass')
-@click.option('--metric-namespace', default='Opencast')
+@workflows.command(name="running")
+@click.option("--stack-name")
+@click.option("--admin-host")
+@click.option("--api-user")
+@click.option("--api-pass")
+@click.option("--metric-namespace", default="Opencast")
 @click.pass_obj
-def running_workflows(ctx, stack_name, admin_host, api_user, api_pass,
-                      metric_namespace):
+def running_workflows(
+    ctx, stack_name, admin_host, api_user, api_pass, metric_namespace
+):
 
-    stack_id = get_stack_id(stack_name)
     digest_auth = get_digest_auth(api_user, api_pass)
     syslog("Fetching count of running workflows")
 
-    endpoint_url = urljoin("http://" + admin_host, 'admin-ng/job/tasks.json')
-    params = {'limit': 999, 'status': 'RUNNING'}
-    headers = {'X-REQUESTED-AUTH': 'Digest'}
-    resp = requests.get(endpoint_url, params=params, auth=digest_auth,
-                        headers=headers)
+    endpoint_url = urljoin("http://" + admin_host, "admin-ng/job/tasks.json")
+    params = {"limit": 999, "status": "RUNNING"}
+    headers = {"X-REQUESTED-AUTH": "Digest"}
+    resp = requests.get(
+        endpoint_url, params=params, auth=digest_auth, headers=headers
+    )
     tasks = resp.json()
     workflow_count = tasks["count"]
 
     syslog("Running workflows: {}".format(workflow_count))
 
-    dimensions = [{ "Name": "OpsworksStack", "Value": stack_name }]
-    ctx["put_metric_data"](metric_namespace, [
-        {
-            "MetricName": "RunningWorkflows",
-            "Value": workflow_count,
-            "Unit": 'Count',
-            "Dimensions": dimensions
-        }
-    ])
+    dimensions = [{"Name": "OpsworksStack", "Value": stack_name}]
+    ctx["put_metric_data"](
+        metric_namespace,
+        [
+            {
+                "MetricName": "RunningWorkflows",
+                "Value": workflow_count,
+                "Unit": "Count",
+                "Dimensions": dimensions,
+            }
+        ],
+    )
 
 
-@workflows.command(name='runtimes')
-@click.option('--stack-name')
-@click.option('--admin-host')
-@click.option('--api-user')
-@click.option('--api-pass')
-@click.option('--end-date')
-@click.option('--days-interval', default=1)
-@click.option('--metric-namespace', default='Opencast')
-@click.option('--mp')
+@workflows.command(name="runtimes")
+@click.option("--stack-name")
+@click.option("--admin-host")
+@click.option("--api-user")
+@click.option("--api-pass")
+@click.option("--end-date")
+@click.option("--days-interval", default=1)
+@click.option("--metric-namespace", default="Opencast")
+@click.option("--mp")
 @click.pass_obj
-def workflow_runtimes(ctx, stack_name, admin_host, api_user, api_pass,
-                      end_date, days_interval, metric_namespace, mp):
+def workflow_runtimes(
+    ctx,
+    stack_name,
+    admin_host,
+    api_user,
+    api_pass,
+    end_date,
+    days_interval,
+    metric_namespace,
+    mp,
+):
 
-    stack_id = get_stack_id(stack_name)
     digest_auth = get_digest_auth(api_user, api_pass)
 
     if end_date is None:
@@ -351,16 +380,16 @@ def workflow_runtimes(ctx, stack_name, admin_host, api_user, api_pass,
 
     syslog("publishing workflow runtime metrics")
 
-    endpoint_url = urljoin("http://" + admin_host, 'workflow/instances.json')
-    headers = {'X-REQUESTED-AUTH': 'Digest'}
+    endpoint_url = urljoin("http://" + admin_host, "workflow/instances.json")
+    headers = {"X-REQUESTED-AUTH": "Digest"}
 
     params = {
-        'count': 20,
-        'startPage': 0,
+        "count": 20,
+        "startPage": 0,
         # opencast is picky af about these date strings smh
-        'fromdate': start_date.format('YYYY-MM-DDTHH:mm:ss') + "Z",
-        'todate': end_date.format('YYYY-MM-DDTHH:mm:ss') + "Z",
-        'state': 'SUCCEEDED'
+        "fromdate": start_date.format("YYYY-MM-DDTHH:mm:ss") + "Z",
+        "todate": end_date.format("YYYY-MM-DDTHH:mm:ss") + "Z",
+        "state": "SUCCEEDED",
     }
 
     if mp is not None:
@@ -368,8 +397,9 @@ def workflow_runtimes(ctx, stack_name, admin_host, api_user, api_pass,
 
     workflows = []
     while True:
-        resp = requests.get(endpoint_url, params=params, auth=digest_auth,
-                            headers=headers)
+        resp = requests.get(
+            endpoint_url, params=params, auth=digest_auth, headers=headers
+        )
         wf_data = resp.json()["workflows"]
         if "workflow" not in wf_data:
             break
@@ -384,8 +414,6 @@ def workflow_runtimes(ctx, stack_name, admin_host, api_user, api_pass,
 
     metric_data = []
 
-    two_weeks_ago = arrow.utcnow().replace(days=-14).timestamp
-
     for wf in workflows:
         ops = wf["operations"]["operation"]
         wf_type = wf["template"]
@@ -394,15 +422,15 @@ def workflow_runtimes(ctx, stack_name, admin_host, api_user, api_pass,
         wf_duration = get_wf_duration(ops)
 
         dimensions = [
-            { "Name": "WorkflowType", "Value": wf_type },
-            { "Name": "OpsworksStack", "Value": stack_name }
+            {"Name": "WorkflowType", "Value": wf_type},
+            {"Name": "OpsworksStack", "Value": stack_name},
         ]
 
         dp = {
             "MetricName": "WorkflowDuration",
             "Value": wf_duration,
             "Unit": "Seconds",
-            "Dimensions": dimensions
+            "Dimensions": dimensions,
         }
         metric_data.append(dp)
 
@@ -413,7 +441,7 @@ def workflow_runtimes(ctx, stack_name, admin_host, api_user, api_pass,
                 "MetricName": "WorkflowPerfRatio",
                 "Value": perf_ratio,
                 "Unit": "None",
-                "Dimensions": dimensions
+                "Dimensions": dimensions,
             }
             metric_data.append(dp)
 
@@ -448,12 +476,12 @@ def get_track_duration_from_wf(wf):
 def get_wf_duration(ops):
     wf_start = ops[0]["started"] / 1000
     wf_end = ops[-1]["completed"] / 1000
-    wf_duration = (wf_end - wf_start)
+    wf_duration = wf_end - wf_start
     return wf_duration
 
 
 def get_stack_id(stack_name):
-    opsworks = boto3.client('opsworks')
+    opsworks = boto3.client("opsworks")
     stacks = opsworks.describe_stacks()
     jp_query = "Stacks[?Name=='{}'] | [0].StackId".format(stack_name)
     stack_id = jmespath.search(jp_query, stacks)
@@ -466,7 +494,7 @@ def get_digest_auth(api_user, api_pass):
 
 def get_workers_layer_id(stack_id):
 
-    opsworks = boto3.client('opsworks')
+    opsworks = boto3.client("opsworks")
     layers = opsworks.describe_layers(StackId=stack_id)
     workers_layer = next(x for x in layers["Layers"] if x["Name"] == "Workers")
     return workers_layer["LayerId"]
@@ -474,36 +502,34 @@ def get_workers_layer_id(stack_id):
 
 def get_load_factors(endpoint, admin_host, auth):
     endpoint_url = urljoin("http://" + admin_host, endpoint)
-    headers = {'X-REQUESTED-AUTH': 'Digest'}
+    headers = {"X-REQUESTED-AUTH": "Digest"}
     resp = requests.get(endpoint_url, auth=auth, headers=headers)
     xml_root = ET.fromstring(resp.content)
-    nodes = xml_root.findall('.//oc:node', namespaces=XML_NAMESPACES)
+    nodes = xml_root.findall(".//oc:node", namespaces=XML_NAMESPACES)
     load_factors = {}
     for node in nodes:
         host = urlparse(node.attrib["host"]).netloc
-        load_factors[host] = float(node.attrib['loadFactor'])
+        load_factors[host] = float(node.attrib["loadFactor"])
     return load_factors
 
 
 def get_worker_host_map(stack_name):
 
-    ec2 = boto3.client('ec2')
+    ec2 = boto3.client("ec2")
     instances = ec2.describe_instances(
-        Filters=[{'Name': 'tag:opsworks:stack', 'Values': [stack_name]}]
+        Filters=[{"Name": "tag:opsworks:stack", "Values": [stack_name]}]
     )
-    jp_query = ("Reservations[].Instances[].[PrivateDnsName, State.Name, "
-                "Tags[?Key=='opsworks:instance'] | [0].Value]")
+    jp_query = (
+        "Reservations[].Instances[].[PrivateDnsName, State.Name, "
+        "Tags[?Key=='opsworks:instance'] | [0].Value]"
+    )
     private_dns_to_hostname = jmespath.search(jp_query, instances)
 
     worker_hosts = [
-        x for x in private_dns_to_hostname
-        if x[2].startswith("workers")
+        x for x in private_dns_to_hostname if x[2].startswith("workers")
     ]
 
-    running_hosts = [
-        x for x in worker_hosts
-        if x[1] == "running"
-    ]
+    running_hosts = [x for x in worker_hosts if x[1] == "running"]
 
     return {
         "running": dict([(x[0], x[2]) for x in running_hosts]),
@@ -516,15 +542,17 @@ def get_runtimes_query(interval_seconds):
     now = datetime.now().isoformat()
     query = """
         SELECT
-            id, status, payload, operation, date_created, 
+            id, status, payload, operation, date_created,
             date_started, date_completed
-        FROM oc_job 
+        FROM oc_job
         WHERE
-            date_completed BETWEEN DATE_SUB("{}", INTERVAL {} SECOND) AND "{}" 
+            date_completed BETWEEN DATE_SUB("{}", INTERVAL {} SECOND) AND "{}"
             AND operation NOT LIKE "START_%"
-        """.format(now, interval_seconds, now)
+        """.format(
+        now, interval_seconds, now
+    )
 
-    return re.compile(r'\s+').sub(' ', query.strip())
+    return re.compile(r"\s+").sub(" ", query.strip())
 
 
 def get_running_ops_query():
@@ -540,9 +568,11 @@ def get_running_ops_query():
         GROUP BY
             ocj.operation,
             ochr.host
-    """.format(OC_JOB_STATUS_RUNNING)
+    """.format(
+        OC_JOB_STATUS_RUNNING
+    )
 
-    return re.compile(r'\s+').sub(' ', query.strip())
+    return re.compile(r"\s+").sub(" ", query.strip())
 
 
 def exec_query(sql):
@@ -565,17 +595,19 @@ def exec_query(sql):
 
 def extract_duration_from_payload(payload):
     try:
-        # some payloads have two (?!--stack-id 2e8db1c3-5bad-4f91-9a2b-905e36617be8 ?) xml docs separated by '###';
+        # some payloads have two (?!?) xml docs separated by '###';
         # duration should be the same, so just take the first one
-        for doc in payload.split('###'):
+        for doc in payload.split("###"):
             root = ET.fromstring(doc.encode())
-            duration = root.find('.//track:duration', namespaces=XML_NAMESPACES)
-            if hasattr(duration, 'text'):
-                return int(duration.text) / 1000 # orig value is in millisec
+            duration = root.find(
+                ".//track:duration", namespaces=XML_NAMESPACES
+            )
+            if hasattr(duration, "text"):
+                return int(duration.text) / 1000  # orig value is in millisec
         return None
     except Exception as e:
         print("something went wrong: {}, {}".format(e, payload))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     cli(obj={})
